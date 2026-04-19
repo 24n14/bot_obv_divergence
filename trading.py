@@ -112,7 +112,6 @@ def main_trading_loop(exchange):
 
     except KeyboardInterrupt:
         logger.info("⏹️ ПОЛУЧЕНА КОМАНДА ВЫКЛЮЧЕНИЯ (Ctrl+C)")
-        logger.info("✅ Позиция остаётся открытой со стоп-лоссом и тейк-профитом")
         logger.info("👋 Бот выключается...")
         return
 
