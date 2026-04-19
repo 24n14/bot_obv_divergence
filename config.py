@@ -20,15 +20,15 @@ AMOUNT = 0.01
 TIMEFRAME = '5m'
 LIMIT = 100
 LIMIT_CANDLES = 100
-STOP_LOSS = 2
+STOP_LOSS = 1
 TAKE_PROFIT = 2
-TRAILING_STOP_DISTANCE = 300
+TRAILING_STOP_DISTANCE = 150
 
 TPSL_SIZE = '50'
 in_position = False
 entry_price = 0.0
 LEVERAGE = 10
-MIN_AMOUNT = 0.001
+#MIN_AMOUNT = 0.001
 
 # ===== ПАРАМЕТРЫ АНАЛИЗА ДИВЕРГЕНЦИИ =====
 LOOKBACK = 50  # окно для анализа дивергенции

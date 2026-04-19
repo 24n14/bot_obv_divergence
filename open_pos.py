@@ -75,7 +75,7 @@ def execute_trade(exchange, symbol, side):
         # === 4. Открытие позиции через CCXT ===
         order = exchange.create_order(
             symbol,
-            'Market',
+            'market',
             side,
             amount,
             params={

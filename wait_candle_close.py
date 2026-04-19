@@ -1,10 +1,8 @@
 import logging
-#import datetime
 import time
-#import pytz
-#import math
 
 logger = logging.getLogger(__name__)
+
 
 def get_timeframe_seconds(tf):
     """Конвертирует таймфрейм в секунды"""
@@ -14,9 +12,13 @@ def get_timeframe_seconds(tf):
     }
     return mapping.get(tf, 300)
 
+
 def wait_for_candle_close(exchange, symbol, timeframe):
-    """Ждет закрытия свечи, синхронизируясь с биржей"""
-    max_retries = 3
+    """
+    Ждет закрытия свечи, синхронизируясь с биржей.
+    УЛУЧШЕНО: Лучшая обработка ошибок и больше попыток
+    """
+    max_retries = 5
     retry_count = 0
 
     while retry_count < max_retries:
@@ -36,22 +38,34 @@ def wait_for_candle_close(exchange, symbol, timeframe):
             exchange_time_sec = exchange_time_ms / 1000
             wait_time = candle_close_time - exchange_time_sec
 
+            logger.debug(f"⏰ Время биржи: {exchange_time_sec:.1f}, "
+                         f"свеча закроется в: {candle_close_time:.1f}, "
+                         f"ожидание: {wait_time:.1f} сек")
+
             if wait_time > 1:
-                logger.info(f"⏳ Ожидание {wait_time:.1f} сек до закрытия свечи {timeframe}")
-                time.sleep(wait_time + 0.5)
-            elif wait_time > -60:
-                logger.info(f"⏳ Свеча закроется скоро, ожидаем {max(wait_time, 0):.1f} сек")
-                time.sleep(max(wait_time + 0.5, 0.5))
+                # Добавляем 0.5 сек запаса на обработку данных
+                actual_wait = wait_time + 0.5
+                logger.info(f"⏳ Ожидание {actual_wait:.1f} сек до закрытия свечи {timeframe}")
+                time.sleep(actual_wait)
+
+            elif wait_time > -5:
+                # Свеча закроется очень скоро или только что закрылась (окно -5 сек)
+                sleep_time = max(wait_time + 0.5, 0.5)
+                logger.debug(f"⏳ Свеча закроется скоро ({wait_time:.1f} сек), ожидаем {sleep_time:.1f} сек")
+                time.sleep(sleep_time)
+
             else:
+                # Свеча давно закрыта, ждём следующую
                 logger.warning(f"⚠️ Свеча закрыта {abs(wait_time):.1f} сек назад, ждём следующую")
                 next_wait = timeframe_sec + wait_time
                 time.sleep(max(next_wait, 1))
 
+            logger.debug("✅ Синхронизация успешна")
             return True
 
         except Exception as e:
             retry_count += 1
-            logger.error(f"❌ Ошибка (попытка {retry_count}/{max_retries}): {e}")
+            logger.warning(f"⚠️ Ошибка синхронизации (попытка {retry_count}/{max_retries}): {e}")
             if retry_count < max_retries:
                 time.sleep(2)
             else:
