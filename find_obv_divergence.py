@@ -8,112 +8,123 @@ logger = logging.getLogger(__name__)
 def find_obv_divergence(high, low, close, volume, lookback=20):
     """
     Ищет дивергенцию между ценой и OBV с улучшенной логикой детекции.
-    Теперь проверяет ВСЕ пары экстремумов, а не только последнюю.
     """
+
+    # Проверка на достаточность данных
+    if len(close) < lookback + 50:  # +50 для EMA50
+        logger.warning(f"Недостаточно данных: {len(close)} < {lookback + 50}")
+        return None, 0.0, {}
 
     # 1. Рассчитываем OBV и его сглаженную версию
     obv = talib.OBV(close, volume)
     obv_sma = talib.SMA(obv, timeperiod=5)
 
-    # 2. Берём срезы для анализа
-    price = close[-lookback:]
-    obv_slice = obv[-lookback:]
-    obv_smooth = obv_sma[-lookback:]
+    # 2. Работаем с полными массивами, но анализируем только последние lookback свечей
+    start_idx = len(close) - lookback
+
+    price_slice = close[start_idx:]
+    obv_slice = obv[start_idx:]
+    obv_smooth_slice = obv_sma[start_idx:]
 
     # 3. Находим локальные экстремумы
-    price_min_idx, price_max_idx = find_local_extremes(price)
-    obv_min_idx, obv_max_idx = find_local_extremes(obv_smooth)
+    price_min_idx, price_max_idx = find_local_extremes(price_slice)
+    obv_min_idx, obv_max_idx = find_local_extremes(obv_smooth_slice)
 
-    # 4. Ищем дивергенции - проверяем ВСЕ пары, выбираем сильнейшую
+    # Конвертируем в абсолютные индексы
+    price_min_idx_abs = [start_idx + idx for idx in price_min_idx]
+    price_max_idx_abs = [start_idx + idx for idx in price_max_idx]
+    obv_min_idx_abs = [start_idx + idx for idx in obv_min_idx]
+    obv_max_idx_abs = [start_idx + idx for idx in obv_max_idx]
+
+    # 4. Ищем дивергенции
     best_signal = None
     best_confidence = 0.0
     best_details = {}
 
     # === БЫЧЬЯ дивергенция ===
-    if len(price_min_idx) >= 2 and len(obv_min_idx) >= 2:
-        # Проверяем все пары минимумов, не только последнюю
-        for i in range(len(price_min_idx) - 1):
-            prev_min = price_min_idx[i]
-            curr_min = price_min_idx[i + 1]
+    if len(price_min_idx_abs) >= 2 and len(obv_min_idx_abs) >= 2:
+        for i in range(len(price_min_idx_abs) - 1):
+            prev_min = price_min_idx_abs[i]
+            curr_min = price_min_idx_abs[i + 1]
 
-            # Находим соответствующие OBV минимумы в интервале
-            obv_mins_in_range = [idx for idx in obv_min_idx if prev_min <= idx <= curr_min]
+            # Улучшенный поиск соответствующих OBV минимумов
+            obv_mins_nearby = find_nearby_extremes(
+                obv_min_idx_abs,
+                target_idx=curr_min,
+                window=5  # ±5 свечей
+            )
 
-            if len(obv_mins_in_range) >= 2:
-                # Берём первый и последний минимум OBV в этом диапазоне
-                prev_obv_min = obv_mins_in_range[0]
-                curr_obv_min = obv_mins_in_range[-1]
+            if len(obv_mins_nearby) >= 2:
+                prev_obv_min = obv_mins_nearby[0]
+                curr_obv_min = obv_mins_nearby[-1]
 
-                # Проверяем условие дивергенции: цена вниз, OBV вверх
-                price_down = price[curr_min] < price[prev_min]
-                obv_up = obv_smooth[curr_obv_min] > obv_smooth[prev_obv_min]
+                # Проверяем условие дивергенции
+                price_down = close[curr_min] < close[prev_min]
+                obv_up = obv_sma[curr_obv_min] > obv_sma[prev_obv_min]
 
                 if price_down and obv_up:
                     confidence, details = calculate_confidence_dynamic(
-                        price=price,
-                        obv=obv_smooth,
+                        price=close,  # Полный массив
+                        obv=obv_sma,  # Полный массив
                         price_idx=(prev_min, curr_min),
                         obv_idx=(prev_obv_min, curr_obv_min),
-                        high=high[-lookback:],
-                        low=low[-lookback:],
-                        close=price,
-                        volume=volume[-lookback:],
+                        high=high,
+                        low=low,
+                        close=close,
+                        volume=volume,
                         divergence_type='bullish'
                     )
 
-                    # Выбираем сигнал с наибольшей уверенностью
                     if confidence > best_confidence:
                         best_confidence = confidence
                         best_signal = 'bullish'
                         best_details = details
                         logger.debug(
-                            f"🟢 BULLISH дивергенция найдена: "
-                            f"price {price[prev_min]:.2f} → {price[curr_min]:.2f}, "
-                            f"OBV {obv_smooth[prev_obv_min]:.0f} → {obv_smooth[curr_obv_min]:.0f}, "
-                            f"confidence: {confidence:.2%}"
+                            f"🟢 BULLISH: price {close[prev_min]:.2f} → {close[curr_min]:.2f}, "
+                            f"OBV {obv_sma[prev_obv_min]:.0f} → {obv_sma[curr_obv_min]:.0f}, "
+                            f"conf: {confidence:.2%}"
                         )
 
     # === МЕДВЕЖЬЯ дивергенция ===
-    if len(price_max_idx) >= 2 and len(obv_max_idx) >= 2:
-        # Проверяем все пары максимумов
-        for i in range(len(price_max_idx) - 1):
-            prev_max = price_max_idx[i]
-            curr_max = price_max_idx[i + 1]
+    if len(price_max_idx_abs) >= 2 and len(obv_max_idx_abs) >= 2:
+        for i in range(len(price_max_idx_abs) - 1):
+            prev_max = price_max_idx_abs[i]
+            curr_max = price_max_idx_abs[i + 1]
 
-            # Находим соответствующие OBV максимумы в интервале
-            obv_maxs_in_range = [idx for idx in obv_max_idx if prev_max <= idx <= curr_max]
+            obv_maxs_nearby = find_nearby_extremes(
+                obv_max_idx_abs,
+                target_idx=curr_max,
+                window=5
+            )
 
-            if len(obv_maxs_in_range) >= 2:
-                prev_obv_max = obv_maxs_in_range[0]
-                curr_obv_max = obv_maxs_in_range[-1]
+            if len(obv_maxs_nearby) >= 2:
+                prev_obv_max = obv_maxs_nearby[0]
+                curr_obv_max = obv_maxs_nearby[-1]
 
-                # Проверяем условие дивергенции: цена вверх, OBV вниз
-                price_up = price[curr_max] > price[prev_max]
-                obv_down = obv_smooth[curr_obv_max] < obv_smooth[prev_obv_max]
+                price_up = close[curr_max] > close[prev_max]
+                obv_down = obv_sma[curr_obv_max] < obv_sma[prev_obv_max]
 
                 if price_up and obv_down:
                     confidence, details = calculate_confidence_dynamic(
-                        price=price,
-                        obv=obv_smooth,
+                        price=close,
+                        obv=obv_sma,
                         price_idx=(prev_max, curr_max),
                         obv_idx=(prev_obv_max, curr_obv_max),
-                        high=high[-lookback:],
-                        low=low[-lookback:],
-                        close=price,
-                        volume=volume[-lookback:],
+                        high=high,
+                        low=low,
+                        close=close,
+                        volume=volume,
                         divergence_type='bearish'
                     )
 
-                    # Выбираем сигнал с наибольшей уверенностью
                     if confidence > best_confidence:
                         best_confidence = confidence
                         best_signal = 'bearish'
                         best_details = details
                         logger.debug(
-                            f"🔴 BEARISH дивергенция найдена: "
-                            f"price {price[prev_max]:.2f} → {price[curr_max]:.2f}, "
-                            f"OBV {obv_smooth[prev_obv_max]:.0f} → {obv_smooth[curr_obv_max]:.0f}, "
-                            f"confidence: {confidence:.2%}"
+                            f"🔴 BEARISH: price {close[prev_max]:.2f} → {close[curr_max]:.2f}, "
+                            f"OBV {obv_sma[prev_obv_max]:.0f} → {obv_sma[curr_obv_max]:.0f}, "
+                            f"conf: {confidence:.2%}"
                         )
 
     if best_signal:
@@ -121,34 +132,51 @@ def find_obv_divergence(high, low, close, volume, lookback=20):
     return None, 0.0, {}
 
 
-def find_local_extremes(arr):
-    """Находит индексы локальных минимумов и максимумов"""
+def find_nearby_extremes(extremes_list, target_idx, window=5):
+    """
+    Находит экстремумы в пределах window от target_idx
+    """
+    nearby = []
+    for idx in extremes_list:
+        if abs(idx - target_idx) <= window:
+            nearby.append(idx)
+    return sorted(nearby)
+
+
+def find_local_extremes(arr, min_distance=2):
+    """
+    Находит индексы локальных минимумов и максимумов
+    """
     min_idx = []
     max_idx = []
-    for i in range(2, len(arr) - 2):
-        if arr[i] < arr[i - 1] and arr[i] < arr[i - 2] and \
-                arr[i] < arr[i + 1] and arr[i] < arr[i + 2]:
-            min_idx.append(i)
-        if arr[i] > arr[i - 1] and arr[i] > arr[i - 2] and \
-                arr[i] > arr[i + 1] and arr[i] > arr[i + 2]:
-            max_idx.append(i)
+
+    for i in range(min_distance, len(arr) - min_distance):
+        # Проверка на минимум
+        is_min = True
+        is_max = True
+
+        for j in range(1, min_distance + 1):
+            if arr[i] >= arr[i - j] or arr[i] >= arr[i + j]:
+                is_min = False
+            if arr[i] <= arr[i - j] or arr[i] <= arr[i + j]:
+                is_max = False
+
+        if is_min:
+            # Проверяем, не слишком ли близко к предыдущему минимуму
+            if not min_idx or i - min_idx[-1] >= min_distance:
+                min_idx.append(i)
+
+        if is_max:
+            if not max_idx or i - max_idx[-1] >= min_distance:
+                max_idx.append(i)
+
     return min_idx, max_idx
 
 
 def calculate_confidence_dynamic(price, obv, price_idx, obv_idx,
                                  high, low, close, volume, divergence_type):
     """
-    Рассчитывает уверенность в дивергенции на основе 6 рыночных факторов.
-    УЛУЧШЕНО: Повышены коэффициенты для более реалистичных значений confidence.
-
-    Максимальная уверенность: 1.0
-    Факторы:
-    - Сила цены: 0-0.25 (увеличено с 0.2)
-    - Сила OBV: 0-0.25 (увеличено с 0.2)
-    - Временное совпадение: 0-0.15
-    - Объём: 0-0.15
-    - Волатильность: 0-0.1 (уменьшено)
-    - Тренд: 0-0.1 (уменьшено)
+    Рассчитывает уверенность в дивергенции
     """
     confidence = 0.0
     details = {}
@@ -158,122 +186,118 @@ def calculate_confidence_dynamic(price, obv, price_idx, obv_idx,
 
     # === ФАКТОР 1: Сила расхождения цены (0 - 0.25) ===
     if divergence_type == 'bullish':
-        price_change = (price[curr_price_idx] - price[prev_price_idx]) / price[prev_price_idx]
-        # Чем сильнее цена упала (отрицательное значение), тем лучше для бычьей дивергенции
-        strength = min(abs(price_change) / 0.03, 1.0)  # 3% падения дают максимум (было 5%)
-    else:  # bearish
-        price_change = (price[curr_price_idx] - price[prev_price_idx]) / price[prev_price_idx]
-        strength = min(price_change / 0.03, 1.0)  # 3% роста даю�� максимум (было 5%)
+        price_change = (price[curr_price_idx] - price[prev_price_idx]) / abs(price[prev_price_idx] + 1e-8)
+        strength = min(abs(price_change) / 0.03, 1.0)
+    else:
+        price_change = (price[curr_price_idx] - price[prev_price_idx]) / abs(price[prev_price_idx] + 1e-8)
+        strength = min(price_change / 0.03, 1.0)
 
-    factor1 = strength * 0.25  # Увеличено с 0.2
+    factor1 = strength * 0.25
     confidence += factor1
     details['price_strength'] = round(factor1, 3)
 
     # === ФАКТОР 2: Сила расхождения OBV (0 - 0.25) ===
     if divergence_type == 'bullish':
-        # OBV должен быть выше предыдущего минимума
-        obv_change = (obv[curr_obv_idx] - obv[prev_obv_idx]) / abs(obv[prev_obv_idx] + 1e-6)
-        strength = min(obv_change / 0.02, 1.0)  # 2% роста OBV дают максимум (было 3%)
+        obv_change = (obv[curr_obv_idx] - obv[prev_obv_idx]) / (abs(obv[prev_obv_idx]) + 1e-8)
+        strength = min(max(obv_change, 0) / 0.02, 1.0)
     else:
-        obv_change = (obv[prev_obv_idx] - obv[curr_obv_idx]) / abs(obv[prev_obv_idx] + 1e-6)
-        strength = min(obv_change / 0.02, 1.0)  # 2% падения OBV дают максимум (было 3%)
+        obv_change = (obv[prev_obv_idx] - obv[curr_obv_idx]) / (abs(obv[prev_obv_idx]) + 1e-8)
+        strength = min(max(obv_change, 0) / 0.02, 1.0)
 
-    factor2 = strength * 0.25  # Увеличено с 0.2
+    factor2 = strength * 0.25
     confidence += factor2
     details['obv_strength'] = round(factor2, 3)
 
-    # === ФАКТОР 3: Временное совпадение экстремумов (0 - 0.15) ===
+    # === ФАКТОР 3: Временное совпадение (0 - 0.15) ===
     time_diff = abs(curr_price_idx - curr_obv_idx)
-    if time_diff == 0:
+    if time_diff <= 1:
         factor3 = 0.15
-    elif time_diff <= 2:
+    elif time_diff <= 3:
         factor3 = 0.12
     elif time_diff <= 5:
         factor3 = 0.08
     else:
-        factor3 = 0.0
+        factor3 = 0.03
     confidence += factor3
     details['time_alignment'] = factor3
 
     # === ФАКТОР 4: Объём на экстремуме (0 - 0.15) ===
-    # Берём объём за 3 свечи вокруг экстремума
-    volume_window = volume[max(0, curr_price_idx - 1):min(len(volume), curr_price_idx + 2)]
-    avg_volume = np.mean(volume_window)
-    historical_avg = np.mean(volume[max(0, curr_price_idx - 20):curr_price_idx])
+    # Безопасный расчет с проверкой границ
+    vol_start = max(0, curr_price_idx - 2)
+    vol_end = min(len(volume), curr_price_idx + 3)
+    volume_window = volume[vol_start:vol_end]
 
-    if historical_avg > 0:
-        volume_ratio = avg_volume / historical_avg
-        if divergence_type == 'bullish':
-            # При бычьей дивергенции на минимуме должен быть высокий объём (паника)
+    hist_start = max(0, curr_price_idx - 30)
+    hist_end = max(1, curr_price_idx)
+    historical_volume = volume[hist_start:hist_end]
+
+    if len(volume_window) > 0 and len(historical_volume) > 0:
+        avg_volume = np.mean(volume_window)
+        historical_avg = np.mean(historical_volume)
+
+        if historical_avg > 0:
+            volume_ratio = avg_volume / historical_avg
             if volume_ratio > 1.5:
                 factor4 = 0.15
             elif volume_ratio > 1.2:
                 factor4 = 0.12
-            elif volume_ratio > 0.9:
+            elif volume_ratio > 0.8:
                 factor4 = 0.08
             else:
-                factor4 = 0.05
+                factor4 = 0.04
         else:
-            # При медвежьей дивергенции на максимуме высокий объём подтверждает разворот
-            if volume_ratio > 1.5:
-                factor4 = 0.15
-            elif volume_ratio > 1.2:
-                factor4 = 0.12
-            elif volume_ratio > 0.9:
-                factor4 = 0.08
-            else:
-                factor4 = 0.05
+            factor4 = 0.05
     else:
         factor4 = 0.05
+
     confidence += factor4
     details['volume_confirm'] = factor4
 
-    # === ФАКТОР 5: Волатильность рынка (0 - 0.1) ===
-    # ATR (Average True Range) как % от цены
+    # === ФАКТОР 5: Волатильность (0 - 0.1) ===
     try:
-        atr = talib.ATR(high, low, close, timeperiod=14)[-1]
-        current_price = close[-1]
-        if current_price > 0:
-            volatility_pct = (atr / current_price) * 100
+        atr = talib.ATR(high, low, close, timeperiod=14)
+        if len(atr) > 0 and not np.isnan(atr[-1]):
+            current_atr = atr[-1]
+            current_price = close[-1]
+            if current_price > 0:
+                volatility_pct = (current_atr / current_price) * 100
+            else:
+                volatility_pct = 2.0
         else:
-            volatility_pct = 0
+            volatility_pct = 2.0
     except:
-        volatility_pct = 2.0  # Значение по умолчанию
+        volatility_pct = 2.0
 
-    if 1.0 < volatility_pct < 5.0:  # Оптимальная волатильность (была 1.5-4.0)
+    if 1.0 < volatility_pct < 5.0:
         factor5 = 0.1
-    elif 0.5 < volatility_pct <= 1.0 or 5.0 <= volatility_pct < 10.0:  # Нормальная
+    elif 0.5 < volatility_pct <= 1.0 or 5.0 <= volatility_pct < 8.0:
         factor5 = 0.06
-    elif volatility_pct <= 0.5 or volatility_pct >= 10.0:  # Слишком тихо или шумно
-        factor5 = 0.02
     else:
-        factor5 = 0.04
+        factor5 = 0.03
+
     confidence += factor5
     details['volatility'] = factor5
 
-    # === ФАКТОР 6: Тренд более высокого таймфрейма (0 - 0.1) ===
-    # Проверяем положение цены относительно EMA50
+    # === ФАКТОР 6: Тренд (0 - 0.1) ===
     try:
         if len(close) >= 50:
             ema50 = talib.EMA(close, timeperiod=50)[-1]
         else:
-            ema50 = np.mean(close)  # Если недостаточно данных, используем простое среднее
+            ema50 = np.mean(close[-20:]) if len(close) >= 20 else close[-1]
     except:
         ema50 = close[-1]
 
     current_price = close[-1]
 
     if divergence_type == 'bullish':
-        # Бычья дивергенция сильнее, если цена ниже EMA50 (отскок от перепроданности)
-        if current_price < ema50 * 0.95:  # на 5% ниже EMA
+        if current_price < ema50 * 0.95:
             factor6 = 0.10
         elif current_price < ema50:
             factor6 = 0.07
         else:
             factor6 = 0.03
     else:
-        # Медвежья дивергенция сильнее, если цена выше EMA50
-        if current_price > ema50 * 1.05:  # на 5% выше EMA
+        if current_price > ema50 * 1.05:
             factor6 = 0.10
         elif current_price > ema50:
             factor6 = 0.07
@@ -283,36 +307,7 @@ def calculate_confidence_dynamic(price, obv, price_idx, obv_idx,
     confidence += factor6
     details['trend_alignment'] = factor6
 
-    # Итоговый confidence ограничиваем 1.0
     confidence = min(confidence, 1.0)
     details['total'] = round(confidence, 3)
 
     return confidence, details
-
-
-# ============ ПРИМЕР ИСПОЛЬЗОВАНИЯ ============
-'''
-# Допустим, df — ваш DataFrame со свечами
-close_prices = df['close'].values
-high_prices = df['high'].values
-low_prices = df['low'].values
-volumes = df['volume'].values
-
-signal, confidence, details = find_obv_divergence(
-    high_prices, low_prices, close_prices, volumes, lookback=50
-)
-
-if signal:
-    print(f"Сигнал: {signal}")
-    print(f"Уверенность: {confidence:.2%}")
-    print("Детали расчёта:")
-    for key, value in details.items():
-        print(f"  {key}: {value}")
-
-    if confidence > 0.65:
-        print("✅ ВХОДИМ в сделку")
-    elif confidence > 0.5:
-        print("⚠️ Входим с половинным объёмом")
-    else:
-        print("❌ Пропускаем — сигнал слабый")
-'''
