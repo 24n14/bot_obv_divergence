@@ -1,5 +1,5 @@
 # 🤖 OBV Divergence Trading Bot
-
+https://github.com/copilot/share/c02242a6-0020-8cc3-b041-6640a0a020c9
 Автоматизированный торговый бот на Python для биржи Bybit, основанный на детекции дивергенции между ценой и индикатором OBV (On Balance Volume).
 
 ## 📋 Содержание
@@ -56,3 +56,5 @@
 ```bash
 git clone https://github.com/24n14/bot_obv_divergence.git
 cd bot_obv_divergence
+
+
